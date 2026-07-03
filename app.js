@@ -19,11 +19,108 @@ const LM = {
 const PINCH_THRESHOLD = 0.055;
 const FRAME_PADDING = 28;
 const FREEZE_HOLD_MS = 250;
-const COUNTDOWN_SECONDS = 3;
+const COUNTDOWN_SECONDS = 5;
 const FIST_HOLD_FRAMES = 12;
 const SNAP_DISTANCE_RATIO = 0.45;
-const GRID = 3;
+let GRID = 3;
 const LOAD_TIMEOUT_MS = 20000;
+
+// Difficulty levels
+const DIFFICULTY_LEVELS = {
+  1: { grid: 2, name: "Fácil", timeBonus: 30 },
+  2: { grid: 3, name: "Médio", timeBonus: 60 },
+  3: { grid: 4, name: "Difícil", timeBonus: 90 },
+};
+let currentLevel = 2;
+
+// Scoring system
+const BASE_TIME = 60;
+const TIME_PENALTY_PER_PHASE = 5;
+const SCORE_PER_PIECE = 100;
+const COMBO_MULTIPLIER = 2;
+
+const scoring = {
+  active: false,
+  startTime: 0,
+  timeRemaining: BASE_TIME,
+  score: 0,
+  combo: 0,
+  perfectSolve: true,
+  phase: 1,
+};
+
+const rankings = {
+  key: 'gesture_rankings',
+  get() {
+    try {
+      return JSON.parse(localStorage.getItem(this.key)) || {};
+    } catch {
+      return {};
+    }
+  },
+  save(filterName, score, time) {
+    const data = this.get();
+    if (!data[filterName]) data[filterName] = [];
+    data[filterName].push({
+      score,
+      time,
+      date: new Date().toISOString(),
+      level: currentLevel,
+    });
+    data[filterName].sort((a, b) => b.score - a.score);
+    data[filterName] = data[filterName].slice(0, 5);
+    localStorage.setItem(this.key, JSON.stringify(data));
+  },
+  getTop(filterName) {
+    const data = this.get();
+    return data[filterName] || [];
+  },
+};
+
+// Sound effects system
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+const sounds = {
+  playTone(freq, duration, type = 'sine', volume = 0.3) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = freq;
+    osc.type = type;
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+  },
+  clack() {
+    this.playTone(800, 0.05, 'square', 0.15);
+    setTimeout(() => this.playTone(600, 0.03, 'square', 0.1), 20);
+  },
+  snap() {
+    this.playTone(1200, 0.08, 'sine', 0.25);
+    setTimeout(() => this.playTone(1800, 0.05, 'sine', 0.15), 30);
+  },
+  countdownBeep() {
+    this.playTone(880, 0.1, 'sine', 0.2);
+  },
+  fanfare() {
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((freq, i) => {
+      setTimeout(() => this.playTone(freq, 0.3, 'sine', 0.2), i * 100);
+    });
+  },
+  combo() {
+    this.playTone(660, 0.1, 'sine', 0.2);
+    setTimeout(() => this.playTone(880, 0.15, 'sine', 0.25), 80);
+    setTimeout(() => this.playTone(1100, 0.2, 'sine', 0.2), 160);
+  },
+  gameOver() {
+    this.playTone(200, 0.5, 'sawtooth', 0.2);
+    setTimeout(() => this.playTone(150, 0.5, 'sawtooth', 0.15), 300);
+  },
+};
 
 const OPEN_HAND_HOLD_FRAMES = 18;
 
@@ -143,12 +240,28 @@ const stripCompleteMsg = document.getElementById("stripCompleteMsg");
 const pauseOverlay = document.getElementById("pauseOverlay");
 const filterBadge = document.getElementById("filterBadge");
 const filterTextEl = document.getElementById("filterText");
+const timerBar = document.getElementById("timerBar");
+const rankingOverlay = document.getElementById("rankingOverlay");
+const rankingFilterName = document.getElementById("rankingFilterName");
+const rankingList = document.getElementById("rankingList");
+const closeRanking = document.getElementById("closeRanking");
 
 let appState = "tracking";
 let isPaused = false;
 let openHandHoldCounter = 0;
+let isMultiplayer = false;
+
+// Multiplayer state
+const multiplayer = {
+  player1: { pieces: [], boardBox: null, solved: false, score: 0 },
+  player2: { pieces: [], boardBox: null, solved: false, score: 0 },
+  sharedPhoto: null,
+};
 
 let currentFilterIndex = 0;
+
+const THREE_FINGERS_HOLD_FRAMES = 15;
+let threeFingersHoldCounter = 0;
 
 const THUMBS_UP_HOLD_FRAMES = 15;
 const THUMBS_UP_COOLDOWN_FRAMES = 20;
@@ -171,6 +284,182 @@ const shatter = {
   startedAt: 0,
   fragments: [],
   pendingCanvas: null,
+};
+
+// Particle system
+const particles = {
+  active: [],
+  fingerTrail: [],
+  
+  addGoldenParticles(x, y, count = 20) {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 50 + Math.random() * 100;
+      this.active.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 100,
+        life: 1,
+        decay: 0.02 + Math.random() * 0.02,
+        size: 2 + Math.random() * 3,
+        color: `hsl(${45 + Math.random() * 15}, 100%, ${50 + Math.random() * 30}%)`,
+        type: 'golden',
+      });
+    }
+  },
+  
+  addConfetti(x, y, count = 50) {
+    const colors = ['#f5c518', '#e0533d', '#5fae6e', '#4a90d9', '#ff6b9d'];
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 100 + Math.random() * 200;
+      this.active.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 150,
+        life: 1,
+        decay: 0.01 + Math.random() * 0.01,
+        size: 4 + Math.random() * 6,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        type: 'confetti',
+        rotation: Math.random() * Math.PI * 2,
+        rotationSpeed: (Math.random() - 0.5) * 10,
+      });
+    }
+  },
+  
+  addFingerTrail(x, y) {
+    this.fingerTrail.push({ x, y, life: 1, decay: 0.08 });
+    if (this.fingerTrail.length > 20) this.fingerTrail.shift();
+  },
+  
+  update(dt) {
+    // Update particles
+    for (let i = this.active.length - 1; i >= 0; i--) {
+      const p = this.active[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 200 * dt; // gravity
+      p.life -= p.decay;
+      if (p.type === 'confetti') {
+        p.rotation += p.rotationSpeed * dt;
+      }
+      if (p.life <= 0) this.active.splice(i, 1);
+    }
+    
+    // Update finger trail
+    for (let i = this.fingerTrail.length - 1; i >= 0; i--) {
+      this.fingerTrail[i].life -= this.fingerTrail[i].decay;
+      if (this.fingerTrail[i].life <= 0) this.fingerTrail.splice(i, 1);
+    }
+  },
+  
+  draw() {
+    // Draw finger trail
+    if (this.fingerTrail.length > 1) {
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let i = 1; i < this.fingerTrail.length; i++) {
+        const prev = this.fingerTrail[i - 1];
+        const curr = this.fingerTrail[i];
+        const alpha = curr.life * 0.5;
+        ctx.strokeStyle = `rgba(245, 197, 24, ${alpha})`;
+        ctx.lineWidth = 4 * curr.life;
+        ctx.beginPath();
+        ctx.moveTo(prev.x, prev.y);
+        ctx.lineTo(curr.x, curr.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    
+    // Draw particles
+    for (const p of this.active) {
+      ctx.save();
+      ctx.globalAlpha = p.life;
+      if (p.type === 'confetti') {
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rotation);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+      } else {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  },
+  
+  clear() {
+    this.active = [];
+    this.fingerTrail = [];
+  },
+};
+
+// Screen shake effect
+const screenShake = {
+  active: false,
+  intensity: 0,
+  duration: 0,
+  startedAt: 0,
+  
+  start(intensity = 10, duration = 300) {
+    this.active = true;
+    this.intensity = intensity;
+    this.duration = duration;
+    this.startedAt = performance.now();
+  },
+  
+  update() {
+    if (!this.active) return { x: 0, y: 0 };
+    const elapsed = performance.now() - this.startedAt;
+    if (elapsed >= this.duration) {
+      this.active = false;
+      return { x: 0, y: 0 };
+    }
+    const progress = elapsed / this.duration;
+    const currentIntensity = this.intensity * (1 - progress);
+    return {
+      x: (Math.random() - 0.5) * currentIntensity,
+      y: (Math.random() - 0.5) * currentIntensity,
+    };
+  },
+};
+
+// Flash effect
+const flashEffect = {
+  active: false,
+  alpha: 0,
+  startedAt: 0,
+  duration: 200,
+  
+  start() {
+    this.active = true;
+    this.alpha = 1;
+    this.startedAt = performance.now();
+  },
+  
+  update() {
+    if (!this.active) return;
+    const elapsed = performance.now() - this.startedAt;
+    if (elapsed >= this.duration) {
+      this.active = false;
+      this.alpha = 0;
+      return;
+    }
+    this.alpha = 1 - elapsed / this.duration;
+  },
+  
+  draw() {
+    if (!this.active || this.alpha <= 0) return;
+    ctx.save();
+    ctx.fillStyle = `rgba(255, 255, 255, ${this.alpha})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  },
 };
 
 const STRIP_MAX_PHOTOS = 3;
@@ -304,8 +593,32 @@ function resetPuzzleOnly() {
   lastSeenFrame.box = null;
   lastSeenFrame.at = 0;
   openHandHoldCounter = 0;
+  threeFingersHoldCounter = 0;
   thumbsUpHoldCounter = 0;
   thumbsUpCooldown = 0;
+  
+  // Reset new systems
+  scoring.active = false;
+  scoring.score = 0;
+  scoring.combo = 0;
+  scoring.perfectSolve = true;
+  scoring.phase = 1;
+  scoring.timeRemaining = BASE_TIME - (scoring.phase - 1) * TIME_PENALTY_PER_PHASE;
+  particles.clear();
+  screenShake.active = false;
+  flashEffect.active = false;
+  
+  // Reset multiplayer state
+  multiplayer.player1.pieces = [];
+  multiplayer.player1.boardBox = null;
+  multiplayer.player1.solved = false;
+  multiplayer.player1.score = 0;
+  multiplayer.player2.pieces = [];
+  multiplayer.player2.boardBox = null;
+  multiplayer.player2.solved = false;
+  multiplayer.player2.score = 0;
+  multiplayer.sharedPhoto = null;
+  
   updateProgressBadge();
 }
 
@@ -323,6 +636,92 @@ function togglePause() {
 function showFilterBadge() {
   filterTextEl.textContent = `filtro: ${PHOTO_FILTERS[currentFilterIndex].name}`;
   filterBadge.classList.add("visible");
+}
+
+function updateTimerBar() {
+  if (!scoring.active) {
+    timerBar.style.width = '100%';
+    timerBar.classList.remove('warning', 'critical');
+    return;
+  }
+  
+  const maxTime = BASE_TIME + DIFFICULTY_LEVELS[currentLevel].timeBonus - (scoring.phase - 1) * TIME_PENALTY_PER_PHASE;
+  const percentage = (scoring.timeRemaining / maxTime) * 100;
+  timerBar.style.width = `${Math.max(0, percentage)}%`;
+  
+  timerBar.classList.remove('warning', 'critical');
+  if (percentage <= 20) {
+    timerBar.classList.add('critical');
+  } else if (percentage <= 40) {
+    timerBar.classList.add('warning');
+  }
+}
+
+function setLevel(level) {
+  currentLevel = level;
+  GRID = DIFFICULTY_LEVELS[level].grid;
+  
+  // Update UI
+  document.querySelectorAll('.level-btn').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.level) === level);
+  });
+  
+  statusText.textContent = `Nível: ${DIFFICULTY_LEVELS[level].name}`;
+  
+  // Reset puzzle if active
+  if (appState === 'puzzle' || appState === 'countdown') {
+    resetPuzzleOnly();
+  }
+}
+
+function showRanking() {
+  const filterName = PHOTO_FILTERS[currentFilterIndex].name;
+  const topScores = rankings.getTop(filterName);
+  
+  rankingFilterName.textContent = filterName;
+  rankingList.innerHTML = '';
+  
+  if (topScores.length === 0) {
+    rankingList.innerHTML = '<div style="text-align:center; color:var(--gallery-ink-soft); padding:20px;">Nenhum registro ainda</div>';
+  } else {
+    topScores.forEach((entry, i) => {
+      const item = document.createElement('div');
+      item.className = 'ranking-item';
+      const date = new Date(entry.date).toLocaleDateString('pt-BR');
+      const levelName = DIFFICULTY_LEVELS[entry.level]?.name || entry.level;
+      item.innerHTML = `
+        <span class="rank">#${i + 1}</span>
+        <span class="score">${entry.score} pts</span>
+        <span class="meta">${entry.time.toFixed(1)}s | ${levelName} | ${date}</span>
+      `;
+      rankingList.appendChild(item);
+    });
+  }
+  
+  rankingOverlay.classList.remove('hidden');
+  setTimeout(() => rankingOverlay.classList.add('visible'), 10);
+}
+
+function hideRanking() {
+  rankingOverlay.classList.remove('visible');
+  setTimeout(() => rankingOverlay.classList.add('hidden'), 300);
+}
+
+function toggleMultiplayer() {
+  isMultiplayer = !isMultiplayer;
+  const btn = document.getElementById('multiplayerBtn');
+  btn.classList.toggle('active', isMultiplayer);
+  
+  if (isMultiplayer) {
+    statusText.textContent = 'Modo 2 jogadores ativo! Mão esquerda = P1, Mão direita = P2';
+  } else {
+    statusText.textContent = 'Modo single jogador';
+  }
+  
+  // Reset puzzle if active
+  if (appState === 'puzzle' || appState === 'countdown') {
+    resetPuzzleOnly();
+  }
 }
 
 function cycleFilter(direction) {
@@ -502,6 +901,22 @@ function isThumbsUp(landmarks) {
   return true;
 }
 
+function isThreeFingers(landmarks) {
+  const wrist = landmarks[LM.WRIST];
+  const pairs = [
+    [LM.INDEX_TIP, LM.INDEX_MCP],
+    [LM.MIDDLE_TIP, LM.MIDDLE_MCP],
+    [LM.RING_TIP, LM.RING_MCP],
+    [LM.PINKY_TIP, LM.PINKY_MCP],
+  ];
+  let extended = 0;
+  for (const [tipIdx, mcpIdx] of pairs) {
+    if (dist2D(landmarks[tipIdx], wrist) > dist2D(landmarks[mcpIdx], wrist)) extended++;
+  }
+  // Exactly 3 fingers extended (index, middle, ring)
+  return extended === 3;
+}
+
 function toPixel(landmarkNorm) {
   return { x: landmarkNorm.x * canvas.width, y: landmarkNorm.y * canvas.height };
 }
@@ -535,6 +950,7 @@ const lastSeenFrame = { box: null, at: 0 };
 const countdown = {
   active: false,
   startedAt: 0,
+  lastBeep: 0,
 };
 
 function startCountdown(frameBox) {
@@ -553,6 +969,13 @@ function drawCountdownOverlay(box) {
     return;
   }
 
+  // Play beep on each second change
+  const n = Math.ceil(remaining);
+  if (n !== countdown.lastBeep) {
+    countdown.lastBeep = n;
+    sounds.countdownBeep();
+  }
+
   applyBWInsideBox(box);
 
   ctx.save();
@@ -560,7 +983,6 @@ function drawCountdownOverlay(box) {
   ctx.lineWidth = 3;
   ctx.strokeRect(box.x, box.y, box.width, box.height);
 
-  const n = Math.ceil(remaining);
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
 
@@ -598,6 +1020,10 @@ function shuffle(arr) {
 
 function finishCountdownAndCapture(box) {
   countdown.active = false;
+  
+  // Flash effect on capture
+  flashEffect.start();
+  sounds.clack();
 
   const mirroredFrame = document.createElement("canvas");
   mirroredFrame.width = canvas.width;
@@ -623,23 +1049,142 @@ function finishCountdownAndCapture(box) {
   applyPhotoboothEffect(fullImageData);
   cropCtx.putImageData(fullImageData, 0, 0);
 
-  puzzle.fullPhotoboothCanvas = cropCanvas;
+  // Set grid size based on current level
+  GRID = DIFFICULTY_LEVELS[currentLevel].grid;
 
-  const tileW = Math.floor(cropCanvas.width / GRID);
-  const tileH = Math.floor(cropCanvas.height / GRID);
+  if (isMultiplayer) {
+    // Create split-screen puzzles for multiplayer
+    multiplayer.sharedPhoto = cropCanvas;
+    
+    const halfWidth = cropCanvas.width / 2;
+    const player1Canvas = document.createElement("canvas");
+    player1Canvas.width = halfWidth;
+    player1Canvas.height = cropCanvas.height;
+    player1Canvas.getContext("2d").drawImage(cropCanvas, 0, 0, halfWidth, cropCanvas.height, 0, 0, halfWidth, cropCanvas.height);
+    
+    const player2Canvas = document.createElement("canvas");
+    player2Canvas.width = halfWidth;
+    player2Canvas.height = cropCanvas.height;
+    player2Canvas.getContext("2d").drawImage(cropCanvas, halfWidth, 0, halfWidth, cropCanvas.height, 0, 0, halfWidth, cropCanvas.height);
+    
+    // Create puzzles for both players
+    createPlayerPuzzle(1, player1Canvas, box, halfWidth, cropCanvas.height);
+    createPlayerPuzzle(2, player2Canvas, box, halfWidth, cropCanvas.height);
+    
+    appState = "puzzle";
+    fistHoldCounter = 0;
+    
+    // Initialize scoring for both players
+    scoring.active = true;
+    scoring.startTime = performance.now();
+    scoring.timeRemaining = BASE_TIME + DIFFICULTY_LEVELS[currentLevel].timeBonus - (scoring.phase - 1) * TIME_PENALTY_PER_PHASE;
+    multiplayer.player1.score = 0;
+    multiplayer.player2.score = 0;
+    
+    updateProgressBadge();
+  } else {
+    // Single player mode
+    puzzle.fullPhotoboothCanvas = cropCanvas;
+
+    const tileW = Math.floor(cropCanvas.width / GRID);
+    const tileH = Math.floor(cropCanvas.height / GRID);
+    const pieces = [];
+
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        const sx = col * tileW;
+        const sy = row * tileH;
+        const w = col === GRID - 1 ? cropCanvas.width - sx : tileW;
+        const h = row === GRID - 1 ? cropCanvas.height - sy : tileH;
+
+        const pieceCanvas = document.createElement("canvas");
+        pieceCanvas.width = w;
+        pieceCanvas.height = h;
+        pieceCanvas.getContext("2d").drawImage(cropCanvas, sx, sy, w, h, 0, 0, w, h);
+
+        pieces.push({
+          row, col,
+          canvas: pieceCanvas,
+          w, h,
+          x: 0, y: 0,
+          placed: false,
+          dragging: false,
+          targetX: 0, targetY: 0, // For entry animation
+        });
+      }
+    }
+
+    const slots = [];
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        slots.push({ x: box.x + col * tileW, y: box.y + row * tileH });
+      }
+    }
+    shuffle(slots);
+
+    // Entry animation: pieces start at center and fly to shuffled positions
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    
+    pieces.forEach((piece, i) => {
+      piece.targetX = slots[i].x;
+      piece.targetY = slots[i].y;
+      piece.x = centerX;
+      piece.y = centerY;
+      piece.animating = true;
+      piece.animStartedAt = performance.now();
+      piece.animDelay = i * 30; // Staggered timing
+      
+      if (isNearOwnCell(piece, box, tileW, tileH)) {
+        snapPieceToCell(piece, box, tileW, tileH);
+        piece.animating = false;
+      }
+    });
+
+    puzzle.boardBox = box;
+    puzzle.pieces = pieces;
+    puzzle.tileW = tileW;
+    puzzle.tileH = tileH;
+    puzzle.solved = pieces.every((p) => p.placed);
+    appState = "puzzle";
+    fistHoldCounter = 0;
+    
+    // Initialize scoring
+    scoring.active = true;
+    scoring.startTime = performance.now();
+    scoring.timeRemaining = BASE_TIME + DIFFICULTY_LEVELS[currentLevel].timeBonus - (scoring.phase - 1) * TIME_PENALTY_PER_PHASE;
+    scoring.score = 0;
+    scoring.combo = 0;
+    scoring.perfectSolve = true;
+    
+    updateProgressBadge();
+  }
+}
+
+function createPlayerPuzzle(playerNum, photoCanvas, originalBox, width, height) {
+  const tileW = Math.floor(width / GRID);
+  const tileH = Math.floor(height / GRID);
   const pieces = [];
+  
+  // Create board box for this player (split screen)
+  const boardBox = {
+    x: playerNum === 1 ? originalBox.x : originalBox.x + originalBox.width / 2,
+    y: originalBox.y,
+    width: originalBox.width / 2,
+    height: originalBox.height,
+  };
 
   for (let row = 0; row < GRID; row++) {
     for (let col = 0; col < GRID; col++) {
       const sx = col * tileW;
       const sy = row * tileH;
-      const w = col === GRID - 1 ? cropCanvas.width - sx : tileW;
-      const h = row === GRID - 1 ? cropCanvas.height - sy : tileH;
+      const w = col === GRID - 1 ? width - sx : tileW;
+      const h = row === GRID - 1 ? height - sy : tileH;
 
       const pieceCanvas = document.createElement("canvas");
       pieceCanvas.width = w;
       pieceCanvas.height = h;
-      pieceCanvas.getContext("2d").drawImage(cropCanvas, sx, sy, w, h, 0, 0, w, h);
+      pieceCanvas.getContext("2d").drawImage(photoCanvas, sx, sy, w, h, 0, 0, w, h);
 
       pieces.push({
         row, col,
@@ -648,6 +1193,8 @@ function finishCountdownAndCapture(box) {
         x: 0, y: 0,
         placed: false,
         dragging: false,
+        targetX: 0, targetY: 0,
+        player: playerNum,
       });
     }
   }
@@ -655,27 +1202,30 @@ function finishCountdownAndCapture(box) {
   const slots = [];
   for (let row = 0; row < GRID; row++) {
     for (let col = 0; col < GRID; col++) {
-      slots.push({ x: box.x + col * tileW, y: box.y + row * tileH });
+      slots.push({ x: boardBox.x + col * tileW, y: boardBox.y + row * tileH });
     }
   }
   shuffle(slots);
 
+  const centerX = boardBox.x + boardBox.width / 2;
+  const centerY = boardBox.y + boardBox.height / 2;
+  
   pieces.forEach((piece, i) => {
-    piece.x = slots[i].x;
-    piece.y = slots[i].y;
-    if (isNearOwnCell(piece, box, tileW, tileH)) {
-      snapPieceToCell(piece, box, tileW, tileH);
-    }
+    piece.targetX = slots[i].x;
+    piece.targetY = slots[i].y;
+    piece.x = centerX;
+    piece.y = centerY;
+    piece.animating = true;
+    piece.animStartedAt = performance.now();
+    piece.animDelay = i * 30;
   });
 
-  puzzle.boardBox = box;
-  puzzle.pieces = pieces;
-  puzzle.tileW = tileW;
-  puzzle.tileH = tileH;
-  puzzle.solved = pieces.every((p) => p.placed);
-  appState = "puzzle";
-  fistHoldCounter = 0;
-  updateProgressBadge();
+  const playerData = playerNum === 1 ? multiplayer.player1 : multiplayer.player2;
+  playerData.pieces = pieces;
+  playerData.boardBox = boardBox;
+  playerData.tileW = tileW;
+  playerData.tileH = tileH;
+  playerData.solved = false;
 }
 
 const drag = {
@@ -704,10 +1254,31 @@ function reconcilePlacedState(box, tileW, tileH) {
 }
 
 function snapPieceToCell(piece, box, tileW, tileH) {
+  const wasPlaced = piece.placed;
   displaceCellOccupant(piece, piece.row, piece.col, box, tileW, tileH);
   piece.x = box.x + piece.col * tileW;
   piece.y = box.y + piece.row * tileH;
   piece.placed = true;
+  
+  // Sound and particle effects on snap
+  if (!wasPlaced) {
+    sounds.snap();
+    const centerX = piece.x + piece.w / 2;
+    const centerY = piece.y + piece.h / 2;
+    particles.addGoldenParticles(centerX, centerY, 15);
+    
+    // Combo system
+    scoring.combo++;
+    if (scoring.combo >= 3) {
+      scoring.combo = 0;
+      sounds.combo();
+      particles.addConfetti(centerX, centerY, 30);
+      // Bonus score for combo
+      scoring.score += SCORE_PER_PIECE * COMBO_MULTIPLIER;
+    } else {
+      scoring.score += SCORE_PER_PIECE;
+    }
+  }
 }
 
 function displaceCellOccupant(piece, targetRow, targetCol, box, tileW, tileH) {
@@ -808,48 +1379,207 @@ function findNearestPiece(px, py) {
 }
 
 function handleDragForHand(handLabel, pinching, indexPx) {
-  if (pinching) {
-    if (drag.activeHand === null) {
-      const candidate = findNearestPiece(indexPx.x, indexPx.y);
-      if (candidate) {
-        drag.activeHand = handLabel;
-        drag.piece = candidate;
-        drag.offsetX = indexPx.x - candidate.x;
-        drag.offsetY = indexPx.y - candidate.y;
-        candidate.dragging = true;
-        candidate.placed = false;
+  // Add finger trail
+  particles.addFingerTrail(indexPx.x, indexPx.y);
+  
+  if (isMultiplayer) {
+    // Multiplayer mode: hand A = player 1 (left), hand B = player 2 (right)
+    const playerNum = handLabel === 'A' ? 1 : 2;
+    const playerData = playerNum === 1 ? multiplayer.player1 : multiplayer.player2;
+    
+    if (pinching) {
+      if (drag.activeHand === null) {
+        const candidate = findNearestPieceInPlayer(indexPx.x, indexPx.y, playerData);
+        if (candidate) {
+          drag.activeHand = handLabel;
+          drag.piece = candidate;
+          drag.offsetX = indexPx.x - candidate.x;
+          drag.offsetY = indexPx.y - candidate.y;
+          candidate.dragging = true;
+          candidate.placed = false;
+        }
+      } else if (drag.activeHand === handLabel && drag.piece) {
+        drag.piece.x = indexPx.x - drag.offsetX;
+        drag.piece.y = indexPx.y - drag.offsetY;
       }
-    } else if (drag.activeHand === handLabel && drag.piece) {
-      drag.piece.x = indexPx.x - drag.offsetX;
-      drag.piece.y = indexPx.y - drag.offsetY;
+    } else {
+      if (drag.activeHand === handLabel && drag.piece) {
+        const piece = drag.piece;
+        piece.dragging = false;
+        sounds.clack();
+        if (isNearOwnCell(piece, playerData.boardBox, playerData.tileW, playerData.tileH)) {
+          snapPieceToCell(piece, playerData.boardBox, playerData.tileW, playerData.tileH);
+          playerData.score += SCORE_PER_PIECE;
+        } else {
+          clampPieceToBoardInPlayer(piece, playerData.boardBox);
+          const box = playerData.boardBox;
+          const cx = piece.x + piece.w / 2;
+          const cy = piece.y + piece.h / 2;
+          const dropCol = Math.min(
+            GRID - 1,
+            Math.max(0, Math.floor((cx - box.x) / playerData.tileW))
+          );
+          const dropRow = Math.min(
+            GRID - 1,
+            Math.max(0, Math.floor((cy - box.y) / playerData.tileH))
+          );
+          displaceCellOccupantInPlayer(piece, dropRow, dropCol, box, playerData.tileW, playerData.tileH, playerData.pieces);
+        }
+        drag.activeHand = null;
+        drag.piece = null;
+        playerData.solved = reconcilePlacedStateInPlayer(playerData.boardBox, playerData.tileW, playerData.tileH, playerData.pieces);
+        updateProgressBadge();
+        
+        // Check for winner
+        if (playerData.solved) {
+          sounds.fanfare();
+          screenShake.start(8, 400);
+          particles.addConfetti(
+            playerData.boardBox.x + playerData.boardBox.width / 2,
+            playerData.boardBox.y + playerData.boardBox.height / 2,
+            80
+          );
+          statusText.textContent = `Jogador ${playerNum} venceu! Feche o punho para reiniciar`;
+        }
+      }
     }
   } else {
-    if (drag.activeHand === handLabel && drag.piece) {
-      const piece = drag.piece;
-      piece.dragging = false;
-      if (isNearOwnCell(piece, puzzle.boardBox, puzzle.tileW, puzzle.tileH)) {
-        snapPieceToCell(piece, puzzle.boardBox, puzzle.tileW, puzzle.tileH);
-      } else {
-        clampPieceToBoard(piece);
-        const box = puzzle.boardBox;
-        const cx = piece.x + piece.w / 2;
-        const cy = piece.y + piece.h / 2;
-        const dropCol = Math.min(
-          GRID - 1,
-          Math.max(0, Math.floor((cx - box.x) / puzzle.tileW))
-        );
-        const dropRow = Math.min(
-          GRID - 1,
-          Math.max(0, Math.floor((cy - box.y) / puzzle.tileH))
-        );
-        displaceCellOccupant(piece, dropRow, dropCol, box, puzzle.tileW, puzzle.tileH);
+    // Single player mode
+    if (pinching) {
+      if (drag.activeHand === null) {
+        const candidate = findNearestPiece(indexPx.x, indexPx.y);
+        if (candidate) {
+          drag.activeHand = handLabel;
+          drag.piece = candidate;
+          drag.offsetX = indexPx.x - candidate.x;
+          drag.offsetY = indexPx.y - candidate.y;
+          candidate.dragging = true;
+          candidate.placed = false;
+          // Reset combo on picking up a piece
+          if (candidate.row !== Math.floor((candidate.y - puzzle.boardBox.y) / puzzle.tileH) ||
+              candidate.col !== Math.floor((candidate.x - puzzle.boardBox.x) / puzzle.tileW)) {
+            scoring.combo = 0;
+            scoring.perfectSolve = false;
+          }
+        }
+      } else if (drag.activeHand === handLabel && drag.piece) {
+        drag.piece.x = indexPx.x - drag.offsetX;
+        drag.piece.y = indexPx.y - drag.offsetY;
       }
-      drag.activeHand = null;
-      drag.piece = null;
-      puzzle.solved = reconcilePlacedState(puzzle.boardBox, puzzle.tileW, puzzle.tileH);
-      updateProgressBadge();
+    } else {
+      if (drag.activeHand === handLabel && drag.piece) {
+        const piece = drag.piece;
+        piece.dragging = false;
+        sounds.clack();
+        if (isNearOwnCell(piece, puzzle.boardBox, puzzle.tileW, puzzle.tileH)) {
+          snapPieceToCell(piece, puzzle.boardBox, puzzle.tileW, puzzle.tileH);
+        } else {
+          // Reset combo on incorrect placement
+          scoring.combo = 0;
+          scoring.perfectSolve = false;
+          clampPieceToBoard(piece);
+          const box = puzzle.boardBox;
+          const cx = piece.x + piece.w / 2;
+          const cy = piece.y + piece.h / 2;
+          const dropCol = Math.min(
+            GRID - 1,
+            Math.max(0, Math.floor((cx - box.x) / puzzle.tileW))
+          );
+          const dropRow = Math.min(
+            GRID - 1,
+            Math.max(0, Math.floor((cy - box.y) / puzzle.tileH))
+          );
+          displaceCellOccupant(piece, dropRow, dropCol, box, puzzle.tileW, puzzle.tileH);
+        }
+        drag.activeHand = null;
+        drag.piece = null;
+        puzzle.solved = reconcilePlacedState(puzzle.boardBox, puzzle.tileW, puzzle.tileH);
+        updateProgressBadge();
+      }
     }
   }
+}
+
+function findNearestPieceInPlayer(px, py, playerData) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const piece of playerData.pieces) {
+    if (piece.displacing) continue;
+    const cx = piece.x + piece.w / 2;
+    const cy = piece.y + piece.h / 2;
+    const d = Math.hypot(px - cx, py - cy);
+    if (d < Math.max(piece.w, piece.h) * 0.75 && d < bestDist) {
+      best = piece;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+function clampPieceToBoardInPlayer(piece, box) {
+  piece.x = Math.min(Math.max(piece.x, box.x), box.x + box.width - piece.w);
+  piece.y = Math.min(Math.max(piece.y, box.y), box.y + box.height - piece.h);
+}
+
+function displaceCellOccupantInPlayer(piece, targetRow, targetCol, box, tileW, tileH, pieces) {
+  const cellX = box.x + targetCol * tileW;
+  const cellY = box.y + targetRow * tileH;
+
+  const occupant = pieces.find((p) => {
+    if (p === piece || p.displacing) return false;
+    const cx = p.x + p.w / 2;
+    const cy = p.y + p.h / 2;
+    return (
+      cx >= cellX && cx < cellX + tileW &&
+      cy >= cellY && cy < cellY + tileH
+    );
+  });
+  if (!occupant) return;
+
+  if (occupant.row === targetRow && occupant.col === targetCol && occupant.placed) {
+    return;
+  }
+
+  occupant.placed = false;
+
+  const freeCells = [];
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      if (row === targetRow && col === targetCol) continue;
+      const cx0 = box.x + col * tileW;
+      const cy0 = box.y + row * tileH;
+      const taken = pieces.some((p) => {
+        if (p === occupant || p === piece || p.displacing) return false;
+        const cx = p.x + p.w / 2;
+        const cy = p.y + p.h / 2;
+        return cx >= cx0 && cx < cx0 + tileW && cy >= cy0 && cy < cy0 + tileH;
+      });
+      if (!taken) freeCells.push({ row, col });
+    }
+  }
+
+  let targetSlot;
+  if (freeCells.length > 0) {
+    targetSlot = freeCells[Math.floor(Math.random() * freeCells.length)];
+  } else {
+    targetSlot = { row: occupant.row, col: occupant.col };
+  }
+
+  const jitterX = (Math.random() - 0.5) * tileW * 0.5;
+  const jitterY = (Math.random() - 0.5) * tileH * 0.5;
+  const targetX = box.x + targetSlot.col * tileW + jitterX;
+  const targetY = box.y + targetSlot.row * tileH + jitterY;
+
+  animateDisplacement(occupant, targetX, targetY, box);
+}
+
+function reconcilePlacedStateInPlayer(box, tileW, tileH, pieces) {
+  if (!box || !pieces.length) return false;
+  for (const piece of pieces) {
+    if (piece.displacing || piece.dragging) continue;
+    piece.placed = isNearOwnCell(piece, box, tileW, tileH);
+  }
+  return pieces.every((p) => p.placed);
 }
 
 function clampPieceToBoard(piece) {
@@ -859,7 +1589,128 @@ function clampPieceToBoard(piece) {
 }
 
 function drawBoardAndPieces() {
-  const box = puzzle.boardBox;
+  if (isMultiplayer) {
+    // Draw both player boards
+    drawPlayerBoard(multiplayer.player1, 1, "#4a90d9");
+    drawPlayerBoard(multiplayer.player2, 2, "#e0533d");
+  } else {
+    // Single player mode
+    const box = puzzle.boardBox;
+
+    ctx.save();
+    ctx.fillStyle = "#000";
+    ctx.fillRect(box.x, box.y, box.width, box.height);
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(245,197,24,0.18)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < GRID; i++) {
+      ctx.beginPath();
+      ctx.moveTo(box.x + i * puzzle.tileW, box.y);
+      ctx.lineTo(box.x + i * puzzle.tileW, box.y + box.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(box.x, box.y + i * puzzle.tileH);
+      ctx.lineTo(box.x + box.width, box.y + i * puzzle.tileH);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Update and draw entry animations
+    const now = performance.now();
+    for (const piece of puzzle.pieces) {
+      if (piece.animating) {
+        const elapsed = now - piece.animStartedAt;
+        if (elapsed >= piece.animDelay) {
+          const animTime = elapsed - piece.animDelay;
+          const duration = 400;
+          const t = Math.min(1, animTime / duration);
+          const eased = 1 - Math.pow(1 - t, 3);
+          piece.x = (box.x + box.width / 2) + (piece.targetX - (box.x + box.width / 2)) * eased;
+          piece.y = (box.y + box.height / 2) + (piece.targetY - (box.y + box.height / 2)) * eased;
+          if (t >= 1) {
+            piece.animating = false;
+            piece.x = piece.targetX;
+            piece.y = piece.targetY;
+          }
+        }
+      }
+    }
+
+    const sorted = [...puzzle.pieces].sort((a, b) => (a.dragging ? 1 : 0) - (b.dragging ? 1 : 0));
+
+    for (const piece of sorted) {
+      ctx.save();
+      if (piece.dragging) {
+        ctx.shadowColor = "rgba(245,197,24,0.9)";
+        ctx.shadowBlur = 14;
+      }
+      ctx.drawImage(piece.canvas, piece.x, piece.y, piece.w, piece.h);
+      ctx.strokeStyle = piece.placed ? "#5fae6e" : "rgba(234,229,214,0.5)";
+      ctx.lineWidth = piece.dragging ? 3 : 1.5;
+      ctx.strokeRect(piece.x, piece.y, piece.w, piece.h);
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.strokeStyle = puzzle.solved ? "#5fae6e" : "#f5c518";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(box.x, box.y, box.width, box.height);
+    ctx.restore();
+
+    // Draw photo preview thumbnail
+    if (puzzle.fullPhotoboothCanvas && !puzzle.solved) {
+      const thumbSize = Math.min(120, Math.min(box.width, box.height) * 0.25);
+      ctx.save();
+      ctx.globalAlpha = 0.6;
+      ctx.drawImage(
+        puzzle.fullPhotoboothCanvas,
+        box.x + box.width - thumbSize - 10,
+        box.y + box.height - thumbSize - 10,
+        thumbSize,
+        thumbSize
+      );
+      ctx.strokeStyle = "rgba(245,197,24,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(
+        box.x + box.width - thumbSize - 10,
+        box.y + box.height - thumbSize - 10,
+        thumbSize,
+        thumbSize
+      );
+      ctx.restore();
+    }
+
+    if (puzzle.solved) {
+      ctx.save();
+      ctx.fillStyle = "rgba(95,174,110,0.15)";
+      ctx.fillRect(box.x, box.y, box.width, box.height);
+      ctx.font = `${Math.max(20, box.width * 0.07)}px 'IBM Plex Mono', monospace`;
+      ctx.fillStyle = "#5fae6e";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      
+      let solveText = "COMPLETO! — feche o punho para salvar";
+      if (scoring.perfectSolve) {
+        solveText = "PERFEITO! — feche o punho para salvar";
+        ctx.font = `${Math.max(24, box.width * 0.08)}px 'IBM Plex Mono', monospace`;
+        ctx.fillStyle = "#f5c518";
+      }
+      ctx.fillText(solveText, box.x + box.width / 2, box.y + box.height / 2);
+      
+      // Show score
+      ctx.font = `${Math.max(16, box.width * 0.05)}px 'IBM Plex Mono', monospace`;
+      ctx.fillStyle = "rgba(234,229,214,0.8)";
+      ctx.fillText(`Pontuação: ${scoring.score}`, box.x + box.width / 2, box.y + box.height / 2 + 30);
+      ctx.restore();
+    }
+  }
+}
+
+function drawPlayerBoard(playerData, playerNum, color) {
+  const box = playerData.boardBox;
+  if (!box) return;
 
   ctx.save();
   ctx.fillStyle = "#000";
@@ -867,26 +1718,47 @@ function drawBoardAndPieces() {
   ctx.restore();
 
   ctx.save();
-  ctx.strokeStyle = "rgba(245,197,24,0.18)";
+  ctx.strokeStyle = `${color}33`; // 20% opacity
   ctx.lineWidth = 1;
   for (let i = 1; i < GRID; i++) {
     ctx.beginPath();
-    ctx.moveTo(box.x + i * puzzle.tileW, box.y);
-    ctx.lineTo(box.x + i * puzzle.tileW, box.y + box.height);
+    ctx.moveTo(box.x + i * playerData.tileW, box.y);
+    ctx.lineTo(box.x + i * playerData.tileW, box.y + box.height);
     ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(box.x, box.y + i * puzzle.tileH);
-    ctx.lineTo(box.x + box.width, box.y + i * puzzle.tileH);
+    ctx.moveTo(box.x, box.y + i * playerData.tileH);
+    ctx.lineTo(box.x + box.width, box.y + i * playerData.tileH);
     ctx.stroke();
   }
   ctx.restore();
 
-  const sorted = [...puzzle.pieces].sort((a, b) => (a.dragging ? 1 : 0) - (b.dragging ? 1 : 0));
+  // Update and draw entry animations
+  const now = performance.now();
+  for (const piece of playerData.pieces) {
+    if (piece.animating) {
+      const elapsed = now - piece.animStartedAt;
+      if (elapsed >= piece.animDelay) {
+        const animTime = elapsed - piece.animDelay;
+        const duration = 400;
+        const t = Math.min(1, animTime / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        piece.x = (box.x + box.width / 2) + (piece.targetX - (box.x + box.width / 2)) * eased;
+        piece.y = (box.y + box.height / 2) + (piece.targetY - (box.y + box.height / 2)) * eased;
+        if (t >= 1) {
+          piece.animating = false;
+          piece.x = piece.targetX;
+          piece.y = piece.targetY;
+        }
+      }
+    }
+  }
+
+  const sorted = [...playerData.pieces].sort((a, b) => (a.dragging ? 1 : 0) - (b.dragging ? 1 : 0));
 
   for (const piece of sorted) {
     ctx.save();
     if (piece.dragging) {
-      ctx.shadowColor = "rgba(245,197,24,0.9)";
+      ctx.shadowColor = color;
       ctx.shadowBlur = 14;
     }
     ctx.drawImage(piece.canvas, piece.x, piece.y, piece.w, piece.h);
@@ -897,20 +1769,28 @@ function drawBoardAndPieces() {
   }
 
   ctx.save();
-  ctx.strokeStyle = puzzle.solved ? "#5fae6e" : "#f5c518";
+  ctx.strokeStyle = playerData.solved ? "#5fae6e" : color;
   ctx.lineWidth = 3;
   ctx.strokeRect(box.x, box.y, box.width, box.height);
   ctx.restore();
 
-  if (puzzle.solved) {
+  // Draw player label
+  ctx.save();
+  ctx.font = `${Math.max(14, box.width * 0.05)}px 'IBM Plex Mono', monospace`;
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.fillText(`J${playerNum}: ${playerData.score} pts`, box.x + box.width / 2, box.y - 10);
+  ctx.restore();
+
+  if (playerData.solved) {
     ctx.save();
     ctx.fillStyle = "rgba(95,174,110,0.15)";
     ctx.fillRect(box.x, box.y, box.width, box.height);
     ctx.font = `${Math.max(20, box.width * 0.07)}px 'IBM Plex Mono', monospace`;
-    ctx.fillStyle = "#5fae6e";
+    ctx.fillStyle = color;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("COMPLETO! — feche o punho para salvar", box.x + box.width / 2, box.y + box.height / 2);
+    ctx.fillText(`JOGADOR ${playerNum} VENCEU!`, box.x + box.width / 2, box.y + box.height / 2);
     ctx.restore();
   }
 }
@@ -920,10 +1800,35 @@ function updateProgressBadge() {
     progressBadge.classList.remove("visible", "solved");
     return;
   }
-  const placedCount = puzzle.pieces.filter((p) => p.placed).length;
-  progressText.textContent = `${placedCount} / ${puzzle.pieces.length} peças colocadas`;
+  
+  let text = '';
+  if (isMultiplayer) {
+    const p1Placed = multiplayer.player1.pieces.filter((p) => p.placed).length;
+    const p2Placed = multiplayer.player2.pieces.filter((p) => p.placed).length;
+    text = `J1: ${p1Placed}/${multiplayer.player1.pieces.length} | J2: ${p2Placed}/${multiplayer.player2.pieces.length}`;
+    
+    if (scoring.active) {
+      const timeSec = Math.ceil(scoring.timeRemaining);
+      text += ` | ${timeSec}s | J1: ${multiplayer.player1.score} | J2: ${multiplayer.player2.score}`;
+    }
+  } else {
+    const placedCount = puzzle.pieces.filter((p) => p.placed).length;
+    text = `${placedCount} / ${puzzle.pieces.length} peças`;
+    
+    if (scoring.active) {
+      const timeSec = Math.ceil(scoring.timeRemaining);
+      text += ` | ${timeSec}s | ${scoring.score} pts`;
+      if (scoring.combo > 0) {
+        text += ` | Combo x${scoring.combo}`;
+      }
+    }
+  }
+  
+  progressText.textContent = text;
   progressBadge.classList.add("visible");
-  progressBadge.classList.toggle("solved", puzzle.solved);
+  progressBadge.classList.toggle("solved", puzzle.solved || (multiplayer.player1.solved || multiplayer.player2.solved));
+  
+  updateTimerBar();
 }
 
 function drawVideoFrame() {
@@ -1128,6 +2033,22 @@ function handleFistReset() {
   puzzle.solved = reallySolved;
 
   if (reallySolved && puzzle.fullPhotoboothCanvas) {
+    // Save score to rankings
+    const filterName = PHOTO_FILTERS[currentFilterIndex].name;
+    const timeTaken = (performance.now() - scoring.startTime) / 1000;
+    rankings.save(filterName, scoring.score, timeTaken);
+    
+    // Play fanfare and effects
+    sounds.fanfare();
+    screenShake.start(8, 400);
+    if (scoring.perfectSolve) {
+      particles.addConfetti(
+        puzzle.boardBox.x + puzzle.boardBox.width / 2,
+        puzzle.boardBox.y + puzzle.boardBox.height / 2,
+        80
+      );
+    }
+    
     shatter.pendingCanvas = puzzle.fullPhotoboothCanvas;
     startShatter(puzzle.fullPhotoboothCanvas, puzzle.boardBox);
   } else {
@@ -1144,6 +2065,18 @@ function processResults(result) {
     updateAndDrawShatter();
     statusText.textContent = "salvando…";
     return;
+  }
+
+  // Update effects
+  const dt = 1 / 60;
+  particles.update(dt);
+  flashEffect.update();
+  const shakeOffset = screenShake.update();
+  
+  // Apply screen shake
+  if (shakeOffset.x !== 0 || shakeOffset.y !== 0) {
+    ctx.save();
+    ctx.translate(shakeOffset.x, shakeOffset.y);
   }
 
   const handsLandmarks = result.landmarks || [];
@@ -1288,32 +2221,33 @@ function processResults(result) {
         lastSeenFrame.at = performance.now();
       }
 
-      const bothPinching = isPinching(handA) && isPinching(handB);
-      if (bothPinching && frameBox.width > 40 && frameBox.height > 40) {
-        if (!freezeGate.holding) {
-          freezeGate.holding = true;
-          freezeGate.since = performance.now();
-        }
-        statusDot.className = "status-dot armed";
-        statusText.textContent = "mantenha o pinch…";
-
-        if (performance.now() - freezeGate.since > FREEZE_HOLD_MS) {
-          freezeGate.holding = false;
+      // Check for 3-finger gesture on either hand to start countdown
+      const threeFingersA = isThreeFingers(handA);
+      const threeFingersB = isThreeFingers(handB);
+      const hasThreeFingers = threeFingersA || threeFingersB;
+      
+      if (hasThreeFingers && frameBox.width > 40 && frameBox.height > 40) {
+        threeFingersHoldCounter++;
+        if (threeFingersHoldCounter >= THREE_FINGERS_HOLD_FRAMES) {
+          threeFingersHoldCounter = 0;
           startCountdown(frameBox);
+        } else {
+          statusDot.className = "status-dot armed";
+          statusText.textContent = `3 dedos para capturar (${threeFingersHoldCounter}/${THREE_FINGERS_HOLD_FRAMES})`;
         }
       } else {
-        freezeGate.holding = false;
-        statusText.textContent = "rastreando mãos";
+        threeFingersHoldCounter = 0;
+        statusText.textContent = "enquadre com 2 mãos, depois polegar para filtro, 3 dedos para capturar";
       }
     } else {
-      freezeGate.holding = false;
+      threeFingersHoldCounter = 0;
       const sinceLastSeen = performance.now() - lastSeenFrame.at;
       if (lastSeenFrame.box && sinceLastSeen < FRAME_GRACE_MS) {
         applyBWInsideBox(lastSeenFrame.box);
         drawLiveFrameOverlay(lastSeenFrame.box);
-        statusText.textContent = "rastreando mãos";
+        statusText.textContent = "enquadre com 2 mãos, depois polegar para filtro, 3 dedos para capturar";
       } else {
-        statusText.textContent = "rastreando mãos";
+        statusText.textContent = "enquadre com 2 mãos, depois polegar para filtro, 3 dedos para capturar";
       }
     }
     return;
@@ -1325,6 +2259,18 @@ function processResults(result) {
   }
 
   if (appState === "puzzle") {
+    // Update timer
+    if (scoring.active && !puzzle.solved) {
+      const elapsed = (performance.now() - scoring.startTime) / 1000;
+      scoring.timeRemaining = Math.max(0, BASE_TIME + DIFFICULTY_LEVELS[currentLevel].timeBonus - (scoring.phase - 1) * TIME_PENALTY_PER_PHASE - elapsed);
+      if (scoring.timeRemaining <= 0) {
+        // Time's up - game over
+        sounds.gameOver();
+        statusText.textContent = "tempo esgotado! feche o punho para reiniciar";
+        scoring.active = false;
+      }
+    }
+    
     const labelsPresent = new Set();
     handsLandmarks.forEach((lm, i) => {
       const label = i === 0 ? "A" : "B";
@@ -1345,12 +2291,19 @@ function processResults(result) {
 
     drawBoardAndPieces();
     drawHandSkeletonsOverBoard(handsLandmarks, puzzle.boardBox);
+    particles.draw();
+    flashEffect.draw();
 
     statusText.textContent = puzzle.solved
       ? (fistHoldCounter > 0
           ? `salvando… mantenha o punho (${fistHoldCounter}/${FIST_HOLD_FRAMES})`
           : "quebra-cabeça completo! feche o punho para salvar")
       : "monte o quebra-cabeça com pinch";
+  }
+  
+  // Restore canvas after screen shake
+  if (shakeOffset.x !== 0 || shakeOffset.y !== 0) {
+    ctx.restore();
   }
 }
 
@@ -1436,5 +2389,25 @@ if (resetAllBtn) {
     if (confirmed) resetEverything();
   });
 }
+
+// Level selector event listeners
+document.querySelectorAll('.level-btn').forEach(btn => {
+  if (btn.id === 'multiplayerBtn') {
+    btn.addEventListener('click', toggleMultiplayer);
+  } else {
+    btn.addEventListener('click', () => {
+      const level = parseInt(btn.dataset.level);
+      setLevel(level);
+    });
+  }
+});
+
+// Ranking overlay event listeners
+if (closeRanking) {
+  closeRanking.addEventListener('click', hideRanking);
+}
+
+// Show ranking when double-clicking filter badge
+filterBadge.addEventListener('dblclick', showRanking);
 
 boot();

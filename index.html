@@ -20,6 +20,16 @@
         <span id="statusDot" class="status-dot"></span>
         <span id="statusText">iniciando jogo…</span>
       </div>
+      <div class="level-selector">
+        <button class="level-btn" data-level="1">2x2</button>
+        <button class="level-btn active" data-level="2">3x3</button>
+        <button class="level-btn" data-level="3">4x4</button>
+        <button class="level-btn" id="multiplayerBtn">👥 2 Jogadores</button>
+      </div>
+    </div>
+
+    <div class="timer-bar-container">
+      <div id="timerBar" class="timer-bar"></div>
     </div>
 
     <div id="progressBadge" class="progress-badge">
@@ -39,6 +49,14 @@
 
     <div id="filterBadge" class="filter-badge">
       <span id="filterText">filtro: P&B</span>
+    </div>
+
+    <div id="rankingOverlay" class="ranking-overlay hidden">
+      <div class="ranking-content">
+        <h2>Ranking - <span id="rankingFilterName"></span></h2>
+        <div id="rankingList" class="ranking-list"></div>
+        <button id="closeRanking" class="ranking-close">fechar</button>
+      </div>
     </div>
 
     <div id="errorBanner"></div>
