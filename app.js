@@ -25,6 +25,89 @@ const SNAP_DISTANCE_RATIO = 0.45;
 const GRID = 3;
 const LOAD_TIMEOUT_MS = 20000;
 
+const OPEN_HAND_HOLD_FRAMES = 18;
+
+const PHOTO_FILTERS = [
+  {
+    name: "P&B",
+    apply(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        let v = gray * PHOTOBOOTH_CONTRAST_ALPHA + PHOTOBOOTH_BRIGHTNESS_BETA;
+        v += gaussianNoise(PHOTOBOOTH_NOISE_STD);
+        v = Math.max(0, Math.min(255, v));
+        d[i] = d[i + 1] = d[i + 2] = v;
+      }
+      return imageData;
+    },
+  },
+  {
+    name: "Sépia",
+    apply(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        d[i]     = Math.min(255, r * 0.393 + g * 0.769 + b * 0.189 + gaussianNoise(6));
+        d[i + 1] = Math.min(255, r * 0.349 + g * 0.686 + b * 0.168 + gaussianNoise(6));
+        d[i + 2] = Math.min(255, r * 0.272 + g * 0.534 + b * 0.131 + gaussianNoise(6));
+      }
+      return imageData;
+    },
+  },
+  {
+    name: "Alto Contraste",
+    apply(imageData) {
+      const d = imageData.data;
+      const factor = 1.8;
+      for (let i = 0; i < d.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+          let v = d[i + c] / 255;
+          v = ((v - 0.5) * factor + 0.5) * 255;
+          d[i + c] = Math.max(0, Math.min(255, v));
+        }
+      }
+      return imageData;
+    },
+  },
+  {
+    name: "Vinheta",
+    apply(imageData) {
+      const d = imageData.data;
+      const w = imageData.width, h = imageData.height;
+      const cx = w / 2, cy = h / 2;
+      const maxDist = Math.sqrt(cx * cx + cy * cy);
+      for (let i = 0; i < d.length; i += 4) {
+        const px = (i / 4) % w;
+        const py = Math.floor((i / 4) / w);
+        const dx = px - cx, dy = py - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy) / maxDist;
+        const vignette = 1 - dist * dist * 0.85;
+        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        let v = (gray * 0.6 + (d[i] + d[i + 1] + d[i + 2]) / 3 * 0.4) * vignette;
+        v += gaussianNoise(5);
+        v = Math.max(0, Math.min(255, v));
+        d[i] = d[i + 1] = d[i + 2] = v;
+      }
+      return imageData;
+    },
+  },
+  {
+    name: "Retrô",
+    apply(imageData) {
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        d[i]     = Math.min(255, gray * 1.1 + 30 + gaussianNoise(10));
+        d[i + 1] = Math.min(255, gray * 0.9 + 15 + gaussianNoise(10));
+        d[i + 2] = Math.min(255, gray * 0.7 + 5  + gaussianNoise(10));
+      }
+      return imageData;
+    },
+  },
+];
+
 const PHOTOBOOTH_CONTRAST_ALPHA = 1.3;
 const PHOTOBOOTH_BRIGHTNESS_BETA = 10;
 const PHOTOBOOTH_NOISE_STD = 15;
@@ -57,8 +140,20 @@ const galleryCount = document.getElementById("galleryCount");
 const downloadStripBtn = document.getElementById("downloadStripBtn");
 const resetAllBtn = document.getElementById("resetAllBtn");
 const stripCompleteMsg = document.getElementById("stripCompleteMsg");
+const pauseOverlay = document.getElementById("pauseOverlay");
+const filterBadge = document.getElementById("filterBadge");
+const filterTextEl = document.getElementById("filterText");
 
 let appState = "tracking";
+let isPaused = false;
+let openHandHoldCounter = 0;
+
+let currentFilterIndex = 0;
+
+const THUMBS_UP_HOLD_FRAMES = 15;
+const THUMBS_UP_COOLDOWN_FRAMES = 20;
+let thumbsUpHoldCounter = 0;
+let thumbsUpCooldown = 0;
 
 const puzzle = {
   boardBox: null,
@@ -208,7 +303,31 @@ function resetPuzzleOnly() {
   fistHoldCounter = 0;
   lastSeenFrame.box = null;
   lastSeenFrame.at = 0;
+  openHandHoldCounter = 0;
+  thumbsUpHoldCounter = 0;
+  thumbsUpCooldown = 0;
   updateProgressBadge();
+}
+
+function togglePause() {
+  isPaused = !isPaused;
+  if (isPaused) {
+    pauseOverlay.classList.add("visible");
+    statusText.textContent = "pausado";
+  } else {
+    pauseOverlay.classList.remove("visible");
+    statusText.textContent = "pronto";
+  }
+}
+
+function showFilterBadge() {
+  filterTextEl.textContent = `filtro: ${PHOTO_FILTERS[currentFilterIndex].name}`;
+  filterBadge.classList.add("visible");
+}
+
+function cycleFilter(direction) {
+  currentFilterIndex = (currentFilterIndex + direction + PHOTO_FILTERS.length) % PHOTO_FILTERS.length;
+  showFilterBadge();
 }
 
 function fitCanvasToWindow() {
@@ -347,6 +466,42 @@ function isFist(landmarks) {
   return curled >= 4;
 }
 
+function isHandOpen(landmarks) {
+  const wrist = landmarks[LM.WRIST];
+  const pairs = [
+    [LM.INDEX_TIP, LM.INDEX_MCP],
+    [LM.MIDDLE_TIP, LM.MIDDLE_MCP],
+    [LM.RING_TIP, LM.RING_MCP],
+    [LM.PINKY_TIP, LM.PINKY_MCP],
+  ];
+  let extended = 0;
+  for (const [tipIdx, mcpIdx] of pairs) {
+    if (dist2D(landmarks[tipIdx], wrist) > dist2D(landmarks[mcpIdx], wrist)) extended++;
+  }
+  const thumbTip = landmarks[LM.THUMB_TIP];
+  const thumbIp = landmarks[3];
+  if (dist2D(thumbTip, wrist) > dist2D(thumbIp, wrist)) extended++;
+  return extended >= 5;
+}
+
+function isThumbsUp(landmarks) {
+  const wrist = landmarks[LM.WRIST];
+  const thumbTip = landmarks[LM.THUMB_TIP];
+  const thumbIp = landmarks[3];
+  const thumbExtended = dist2D(thumbTip, wrist) > dist2D(thumbIp, wrist);
+  if (!thumbExtended) return false;
+  const pairs = [
+    [LM.INDEX_TIP, LM.INDEX_MCP],
+    [LM.MIDDLE_TIP, LM.MIDDLE_MCP],
+    [LM.RING_TIP, LM.RING_MCP],
+    [LM.PINKY_TIP, LM.PINKY_MCP],
+  ];
+  for (const [tipIdx, mcpIdx] of pairs) {
+    if (dist2D(landmarks[tipIdx], wrist) > dist2D(landmarks[mcpIdx], wrist)) return false;
+  }
+  return true;
+}
+
 function toPixel(landmarkNorm) {
   return { x: landmarkNorm.x * canvas.width, y: landmarkNorm.y * canvas.height };
 }
@@ -430,15 +585,7 @@ function gaussianNoise(std) {
 }
 
 function applyPhotoboothEffect(imageData) {
-  const d = imageData.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    let v = gray * PHOTOBOOTH_CONTRAST_ALPHA + PHOTOBOOTH_BRIGHTNESS_BETA;
-    v += gaussianNoise(PHOTOBOOTH_NOISE_STD);
-    v = Math.max(0, Math.min(255, v));
-    d[i] = d[i + 1] = d[i + 2] = v;
-  }
-  return imageData;
+  return PHOTO_FILTERS[currentFilterIndex].apply(imageData);
 }
 
 function shuffle(arr) {
@@ -1002,6 +1149,73 @@ function processResults(result) {
   const handsLandmarks = result.landmarks || [];
   const noHands = handsLandmarks.length === 0;
 
+  // ── Open hand pause detection ──
+  // 10 fingers (both hands open) = pause, 5 fingers (one hand open) = unpause
+  if (!noHands) {
+    const openHandsCount = handsLandmarks.filter((lm) => isHandOpen(lm)).length;
+    const draggingNow = drag.activeHand !== null && drag.piece !== null;
+
+    // PAUSE: both hands open (10 fingers) held for N frames
+    if (openHandsCount >= 2 && !isPaused && !draggingNow && appState !== "countdown" && appState !== "shattering") {
+      openHandHoldCounter++;
+      if (openHandHoldCounter >= OPEN_HAND_HOLD_FRAMES) {
+        openHandHoldCounter = 0;
+        if (!isPaused) togglePause();
+        return;
+      }
+      statusText.textContent = `levante as 2 maos para pausar (${openHandHoldCounter}/${OPEN_HAND_HOLD_FRAMES})`;
+    }
+    // UNPAUSE: one hand open (5 fingers) while paused
+    else if (openHandsCount === 1 && isPaused) {
+      openHandHoldCounter++;
+      if (openHandHoldCounter >= OPEN_HAND_HOLD_FRAMES) {
+        openHandHoldCounter = 0;
+        if (isPaused) togglePause();
+        return;
+      }
+      statusText.textContent = `despausando… (${openHandHoldCounter}/${OPEN_HAND_HOLD_FRAMES})`;
+    }
+    else {
+      openHandHoldCounter = 0;
+    }
+
+    // Thumbs up filter cycling (only when not paused, not dragging)
+    if (!isPaused && !draggingNow && appState !== "countdown" && appState !== "shattering") {
+      if (thumbsUpCooldown > 0) {
+        thumbsUpCooldown--;
+      }
+      const thumbsUpHand = handsLandmarks.find((lm) => isThumbsUp(lm));
+      if (thumbsUpHand && thumbsUpCooldown === 0) {
+        thumbsUpHoldCounter++;
+        if (thumbsUpHoldCounter >= THUMBS_UP_HOLD_FRAMES) {
+          thumbsUpHoldCounter = 0;
+          thumbsUpCooldown = THUMBS_UP_COOLDOWN_FRAMES;
+          cycleFilter(1);
+        } else {
+          statusText.textContent = appState === "tracking"
+            ? `polegar para cima para trocar filtro (${thumbsUpHoldCounter}/${THUMBS_UP_HOLD_FRAMES})`
+            : statusText.textContent;
+        }
+      } else if (!thumbsUpHand) {
+        thumbsUpHoldCounter = 0;
+      }
+    } else {
+      thumbsUpHoldCounter = 0;
+    }
+  } else {
+    openHandHoldCounter = 0;
+    thumbsUpHoldCounter = 0;
+  }
+
+  // ── Skip all processing when paused ──
+  if (isPaused) {
+    ctx.save();
+    ctx.fillStyle = "rgba(10,10,8,0.55)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+    return;
+  }
+
   if (noHands) {
     statusDot.className = puzzle.solved ? "status-dot solved" : "status-dot";
     fistHoldCounter = 0;
@@ -1164,7 +1378,7 @@ function showLoaderError(message) {
 function resetLoaderUI() {
   loadingOverlay.classList.remove("hidden");
   loaderText.style.color = "";
-  loaderText.textContent = "cargando modelo HandLandmarker…";
+  loaderText.textContent = "carregando Gestura";
   loaderRetry.classList.add("hidden");
   errorBanner.style.display = "none";
 }
