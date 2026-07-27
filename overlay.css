@@ -1,0 +1,111 @@
+#gestura-panel {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: 220px;
+  background: #111318;
+  border: 1px solid #2c313a;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  z-index: 2147483000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  color: #e7e9ee;
+  overflow: hidden;
+  user-select: none;
+}
+
+#gestura-panel.collapsed #gestura-body {
+  display: none;
+}
+
+#gestura-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #1a1d24;
+  cursor: move;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#gestura-header .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d94b4b;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+#gestura-header .dot.on { background: #3fce6b; }
+#gestura-header .dot.pinch { background: #f2b43a; }
+
+#gestura-header button {
+  background: transparent;
+  border: none;
+  color: #9aa1ad;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+#gestura-body {
+  padding: 8px;
+}
+
+#gestura-body iframe {
+  width: 100%;
+  height: 165px;
+  border: 0;
+  border-radius: 8px;
+  background: #000;
+  display: block;
+}
+
+#gestura-toggle {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  border: none;
+  background: #3fce6b;
+  color: #05130a;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#gestura-toggle.stop {
+  background: #d94b4b;
+  color: #1a0505;
+}
+
+#gestura-hint {
+  font-size: 11px;
+  color: #9aa1ad;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+#gestura-virtual-cursor {
+  position: fixed;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid #3fce6b;
+  background: rgba(63, 206, 107, 0.18);
+  pointer-events: none;
+  z-index: 2147483001;
+  transform: translate(-50%, -50%);
+  display: none;
+  transition: width .08s, height .08s, background .08s, border-color .08s;
+}
+
+#gestura-virtual-cursor.pinching {
+  width: 18px;
+  height: 18px;
+  background: rgba(242, 180, 58, 0.35);
+  border-color: #f2b43a;
+}

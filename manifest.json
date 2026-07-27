@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Gestura Chess Control",
+  "version": "1.0.0",
+  "description": "Jogue xadrez no chess.com usando gestos de mao (pinca) via webcam.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.chess.com/*",
+    "https://chess.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*", "https://chess.com/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["camera.html", "camera.js", "lib/*", "lib/wasm/*"],
+      "matches": ["https://www.chess.com/*", "https://chess.com/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
